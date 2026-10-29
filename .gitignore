@@ -1,0 +1,24 @@
+.venv/
+__pycache__/
+*.pyc
+*.wav
+*.egg-info/
+dist/
+# Narrations, local models, credentials and workspace tooling
+*.mp3
+*.ogg
+*.flac
+*.pcm
+/narration*.json
+/mech-interp-*
+/output/
+/tmp/
+/.cache/
+/models/
+/.agents/
+/.codex/
+/.aws/
+.env
+.env.*
+!.env.example
+/build/

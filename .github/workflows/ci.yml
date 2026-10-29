@@ -1,0 +1,50 @@
+name: Alpha checks and builds
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.12.24'
+          enable-cache: true
+      - name: Install Linux test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk xvfb xauth poppler-utils tesseract-ocr tesseract-ocr-eng libreoffice-writer fonts-dejavu-core libxcursor1 libxrandr2 libxinerama1
+      - name: Install locked Python dependencies
+        run: uv sync --frozen --python /usr/bin/python3
+      - name: Test under a virtual desktop (no models or audio hardware)
+        env:
+          RUNESPEAK_GUI_TESTS: '1'
+        run: xvfb-run -a .venv/bin/python -m unittest discover -s tests -v
+      - name: Test browser extension
+        run: node tests/test_extension.cjs
+      - name: Build distributions and alpha bundles
+        run: |
+          uv build
+          python3 scripts/build-deb.py
+          python3 scripts/package-release.py
+          python3 scripts/verify-release.py
+      - name: Verify installed wheel resources
+        run: |
+          uv venv /tmp/runespeak-wheel-check --python /usr/bin/python3
+          uv pip install --python /tmp/runespeak-wheel-check/bin/python --no-deps dist/*.whl
+          cd /tmp
+          /tmp/runespeak-wheel-check/bin/python -c "from importlib.resources import files; r=files('runespeak'); assert r.joinpath('resources/icon.png').is_file(); assert r.joinpath('resources/voices.json').is_file(); assert r.joinpath('resources/narrator.png').is_file()"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: runespeak-alpha-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

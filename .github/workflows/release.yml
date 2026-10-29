@@ -1,0 +1,53 @@
+name: Prepare draft alpha release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing alpha tag matching pyproject.toml (for example v0.1.0a1)'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: draft-alpha-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  build:
+    uses: ./.github/workflows/ci.yml
+  draft:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate alpha tag and commit
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess, tomllib
+          version = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v\d+\.\d+\.\d+a\d+', tag) or tag != 'v'+version:
+              raise SystemExit('Tag must match the alpha version in pyproject.toml')
+          commit = subprocess.check_output(['git','rev-parse','--verify','refs/tags/'+tag+'^{commit}'], text=True).strip()
+          if commit != os.environ['GITHUB_SHA']:
+              raise SystemExit('Run this workflow on the same tag/commit as the requested alpha tag.')
+          PY
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: runespeak-alpha-${{ github.sha }}
+          path: dist
+      - name: Validate artifacts before preparing the draft
+        run: python3 scripts/verify-release.py
+      - name: Create unpublished alpha draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --prerelease --title "Runespeak Lite $RELEASE_TAG — Alpha" --notes-file docs/alpha-release-notes.md
