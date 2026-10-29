@@ -9,7 +9,7 @@ A small native Linux narrator using **Phonon 31M English directly**, without Oll
 Download the `amd64.deb` asset from the alpha release (when available) on Ubuntu 24.04+ or Debian 12+:
 
 ```bash
-sudo apt install ./runespeak-lite_0.1.0~alpha1_amd64.deb
+sudo apt install ./runespeak-lite_0.1.0a1_amd64.deb
 ```
 
 Open **Runespeak Lite** from Applications and pin it to your dock. First launch shows a setup window while downloading locked dependencies; Phonon downloads on first speech generation. Internet is needed for these initial downloads, then narration runs locally. The package needs no source checkout or uv. This alpha targets x86-64 Linux; Windows is planned later.

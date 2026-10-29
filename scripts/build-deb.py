@@ -40,7 +40,7 @@ def main():
         control = root/'DEBIAN/control'
         control.parent.mkdir()
         control.write_text(f'Package: runespeak-lite\nVersion: {deb_version}\nSection: sound\nPriority: optional\nArchitecture: amd64\nMaintainer: Runespeak Lite contributors\nDepends: python3 (>= 3.11), python3-tk, python3-venv, pipewire-bin | pulseaudio-utils | alsa-utils, libxcursor1, libxrandr2, libxinerama1, ca-certificates\nRecommends: poppler-utils, tesseract-ocr, tesseract-ocr-eng, libreoffice-writer\nDescription: Local Phonon speaking tome (alpha)\n Reads webpages and documents with local speech synthesis.\n First launch downloads locked Python dependencies into a user-owned runtime.\n Speech model files download on first use.\n')
-        output = ROOT/'dist'/f'runespeak-lite_{deb_version}_amd64.deb'
+        output = ROOT/'dist'/f'runespeak-lite_{version}_amd64.deb'
         subprocess.run(['dpkg-deb','--root-owner-group','--build',str(root),str(output)], check=True)
         print(output)
 

@@ -48,7 +48,7 @@ def main():
                 entry.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(entry, file.read_bytes())
     deb_version = re.sub(r'a(\d+)$', r'~alpha\1', version)
-    expected = {f'runespeak-lite_{deb_version}_amd64.deb', filename, f'runespeak-firefox-{extension_version}-unsigned.zip',
+    expected = {f'runespeak-lite_{version}_amd64.deb', filename, f'runespeak-firefox-{extension_version}-unsigned.zip',
                 f'runespeak_lite-{version}.tar.gz', f'runespeak_lite-{version}-py3-none-any.whl'}
     artifacts = sorted(file for file in output.iterdir() if file.is_file() and not file.name.startswith('.') and file.name != 'SHA256SUMS')
     if {file.name for file in artifacts} != expected:

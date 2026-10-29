@@ -3,7 +3,7 @@ Runespeak Lite is an early Linux alpha: an offline speaking tome powered by Phon
 Included: webpage/Wikipedia and document reading, local OCR, streaming narration, selectable English/character voices, read-along highlighting, navigation and WAV export.
 
 Downloads:
-- The amd64 `.deb` is the desktop app installer for Ubuntu 24.04+ / Debian 12+. Install with `sudo apt install ./runespeak-lite_0.1.0~alpha1_amd64.deb`, then open Runespeak Lite from Applications. First launch shows a setup window while downloading locked dependencies into your user account. No checkout or uv is required.
+- The amd64 `.deb` is the desktop app installer for Ubuntu 24.04+ / Debian 12+. Install with `sudo apt install ./runespeak-lite_0.1.0a1_amd64.deb`, then open Runespeak Lite from Applications. First launch shows a setup window while downloading locked dependencies into your user account. No checkout or uv is required.
 - The Linux source archive is an alternative alpha download. Extract it, install the Linux prerequisites from README, then run uv sync and the desktop/integration installers. Keep the extracted folder in place.
 - The wheel and Python source distribution contain the app. Desktop installers and Firefox companion source are in the Linux source bundle.
 - The unsigned Firefox ZIP is a development extension. Load temporarily through Firefox's about:debugging page; it is not Mozilla-signed.

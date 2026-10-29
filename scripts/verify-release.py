@@ -20,7 +20,7 @@ def main():
     version = tomllib.loads((root/'pyproject.toml').read_text())['project']['version']
     extension = json.loads((root/'firefox-extension/manifest.json').read_text())['version']
     deb_version = re.sub(r'a(\d+)$', r'~alpha\1', version)
-    expected = {f'runespeak-lite_{deb_version}_amd64.deb', f'runespeak_lite-{version}.tar.gz', f'runespeak_lite-{version}-py3-none-any.whl',
+    expected = {f'runespeak-lite_{version}_amd64.deb', f'runespeak_lite-{version}.tar.gz', f'runespeak_lite-{version}-py3-none-any.whl',
                 f'runespeak-lite-{version}-linux-source.tar.gz', f'runespeak-firefox-{extension}-unsigned.zip'}
     listed = set()
     for line in sums.read_text().splitlines():
@@ -52,7 +52,7 @@ def main():
                     raise SystemExit('Unsafe archive path: '+member.name)
                 if any(part in ('.git','.venv','.aws','.codex','.agents','__pycache__','models') for part in path.parts) or path.suffix in ('.wav','.mp3','.pcm','.pyc') or any(part.startswith('mech-interp') or part.startswith('.env') for part in path.parts):
                     raise SystemExit('Local artifact in release: '+member.name)
-    deb = directory/f'runespeak-lite_{deb_version}_amd64.deb'
+    deb = directory/f'runespeak-lite_{version}_amd64.deb'
     content = subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(deb)])
     with tarfile.open(fileobj=io.BytesIO(content)) as package:
         names = {member.name.removeprefix('./'): member for member in package.getmembers()}
