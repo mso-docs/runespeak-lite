@@ -21,6 +21,10 @@ def main():
         root = Path(temporary)
         payload = root/'usr/share/runespeak-lite'
         payload.mkdir(parents=True)
+        legal = root/'usr/share/doc/runespeak-lite'
+        legal.mkdir(parents=True)
+        shutil.copyfile(ROOT/'LICENSE', legal/'copyright')
+        shutil.copyfile(ROOT/'NOTICE', legal/'NOTICE')
         shutil.copyfile(wheel, payload/wheel.name)
         shutil.copyfile(ROOT/'scripts/linux-launcher.py', payload/'launcher.py')
         shutil.copyfile(ROOT/'runespeak/resources/icon.png', payload/'icon.png')

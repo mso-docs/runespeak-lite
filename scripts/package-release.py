@@ -13,7 +13,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED = ('runespeak', 'scripts', 'assets', 'firefox-extension', 'tests', 'docs',
-           '.github', 'README.md', 'pyproject.toml', 'uv.lock', '.gitignore')
+           '.github', 'README.md', 'LICENSE', 'NOTICE', 'pyproject.toml', 'uv.lock', '.gitignore')
 
 
 def files():
@@ -42,6 +42,10 @@ def main():
             archive.addfile(entry, io.BytesIO(data))
     extension_version = json.loads((ROOT/'firefox-extension/manifest.json').read_text())['version']
     with zipfile.ZipFile(output/f'runespeak-firefox-{extension_version}-unsigned.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+        for name in ('LICENSE', 'NOTICE'):
+            entry = zipfile.ZipInfo(name, date_time=(2020,1,1,0,0,0))
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(entry, (ROOT/name).read_bytes())
         for file in sorted((ROOT/'firefox-extension').iterdir()):
             if file.is_file():
                 entry = zipfile.ZipInfo(file.name, date_time=(2020,1,1,0,0,0))

@@ -192,3 +192,9 @@ RUNESPEAK_GUI_TESTS=1 .venv/bin/python -m unittest discover -s tests -v
 ```
 
 The tests cover article limits and cancellation, text splitting, lossless WAV assembly, first-section playback, pause between sections, avoiding duplicate playback after assembly, direct selection delivery, native-message framing, invalid requests, and socket lifecycle. The JS checks exercise Firefox menu/shortcut handlers and error reporting using mocked browser APIs; an actual Firefox add-on load remains a separate manual check.
+
+## License
+
+Copyright 2026 mso-docs and Runespeak Lite contributors. Licensed under the [Apache License 2.0](LICENSE); see [NOTICE](NOTICE) for attribution. Commercial use, modification and redistribution are permitted under its terms, including in closed-source products.
+
+Third-party dependencies, downloaded models and voice assets retain their own licenses. The Phonon 31M English model and Gradium voice catalog are Apache-2.0; other Phonon models may have different terms.

@@ -1,0 +1,9 @@
+Runespeak Lite
+Copyright 2026 mso-docs and Runespeak Lite contributors
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+Third-party dependencies, model weights and voice assets retain their own
+licenses and notices. This project license does not replace those terms.
+The bundled English voice catalog is derived from Gradium
+(https://huggingface.co/gradium/phonon-voices), licensed under Apache-2.0.

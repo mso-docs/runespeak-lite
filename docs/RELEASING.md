@@ -4,7 +4,7 @@ Commits alone stay local. After connecting this repository to GitHub, pushes and
 
 ## First setup
 
-Create/connect the intended GitHub repository and push this project. No remote is configured in this checkout yet. Workflows use the built-in GitHub token; no publishing token or PyPI account is needed. The current application version is 0.1.0a1.
+The GitHub remote is `https://github.com/mso-docs/runespeak-lite.git`. Push changes to that repository. Workflows use the built-in GitHub token; no publishing token or PyPI account is needed. The current application version is 0.1.0a1.
 
 ## Every pushed commit
 
@@ -33,6 +33,6 @@ python3 scripts/package-release.py
 python3 scripts/verify-release.py
 ~~~
 
-Use a clean dist directory for each version. Review docs/alpha-release-notes.md before preparing a draft. The application has not yet declared an open-source license; choose the intended project license before public distribution. Model/runtime/voice licenses remain separate from the application.
+Use a clean dist directory for each version. Review docs/alpha-release-notes.md before preparing a draft. The application is licensed under Apache-2.0; include LICENSE and NOTICE in distributions. Model/runtime/voice licenses remain separate from the application.
 
 The `.deb` targets x86-64 Ubuntu 24.04+ / Debian 12+. It installs the launcher, icons and packaged wheel, then uses a per-user, per-version Python environment with hash-checked dependencies exported from uv.lock. First launch requires internet and shows setup progress. Model downloads remain separate. Building requires `dpkg-deb` and `uv`; no root or system installation is needed to build. Windows packaging is deferred.
