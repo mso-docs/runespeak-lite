@@ -10,6 +10,14 @@ The GitHub remote is `https://github.com/mso-docs/runespeak-lite.git`. Push chan
 
 The Alpha checks and builds workflow runs Linux tests under Xvfb, exercises document/OCR conversion and browser handlers, builds Python packages and a clean source bundle, checks contents/checksums, and uploads the assets as a workflow artifact for 14 days. It does not download speech models or require sound hardware. Real inference remains an opt-in local smoke test.
 
+The **macOS and Windows checks and bundles** workflow (`.github/workflows/desktop-bundles.yml`) runs on every push and pull request:
+
+- **lock-sync** checks that `uv.lock` is current and that `packaging/requirements-bundle.txt` matches it.
+- **tests** runs the unit tests on `macos-15-intel`, `macos-15` (Apple Silicon) and `windows-latest`. The desktop layout tests also run there but are informational only.
+- **bundle** builds self-contained bundles with `packaging/build_bundle.py --smoke` and uploads them as workflow artifacts for 14 days: `Runespeak-Lite-<version>-macos-x86_64.dmg`, `…-macos-aarch64.dmg`, `…-windows-x64-setup.exe` (Inno Setup, installed with Chocolatey) and `…-windows-x64-portable.zip`, each with `SHA256SUMS-*` and `BUILD-MANIFEST-*.json`.
+
+It never creates tags or releases. The macOS bundles are ad-hoc signed and not notarized; the Windows installer is unsigned.
+
 ## Prepare an unpublished release
 
 1. Set the next alpha version in pyproject.toml, run uv lock, update release notes, and commit/push.
@@ -35,4 +43,22 @@ python3 scripts/verify-release.py
 
 Use a clean dist directory for each version. Review docs/alpha-release-notes.md before preparing a draft. The application is licensed under Apache-2.0; include LICENSE and NOTICE in distributions. Model/runtime/voice licenses remain separate from the application.
 
-The `.deb` targets x86-64 Ubuntu 24.04+ / Debian 12+. It installs the launcher, icons and packaged wheel, then uses a per-user, per-version Python environment with hash-checked dependencies exported from uv.lock. First launch requires internet and shows setup progress. Model downloads remain separate. Building requires `dpkg-deb` and `uv`; no root or system installation is needed to build. Windows packaging is deferred.
+The `.deb` targets x86-64 Ubuntu 24.04+ / Debian 12+. It installs the launcher, icons and packaged wheel, then uses a per-user, per-version Python environment with hash-checked dependencies exported from uv.lock. First launch requires internet and shows setup progress. Model downloads remain separate. Building requires `dpkg-deb` and `uv`; no root or system installation is needed to build. macOS and Windows bundles are built separately; see below.
+
+## Build macOS and Windows bundles locally
+
+Run on the target system (macOS bundles on a Mac, Windows bundles on Windows), with any Python 3.11 or newer:
+
+~~~bash
+python3 packaging/build_bundle.py --output release --smoke       # add --tts-smoke to synthesize one sentence
+~~~
+
+The script downloads a relocatable CPython 3.14 from python-build-standalone (with Tk), installs `packaging/requirements-bundle.txt` as hash-checked binary wheels, and copies the `runespeak` package into it. On macOS it writes `release/Runespeak Lite.app` and a `.dmg`; on Windows it writes the portable `.zip` and, when Inno Setup's `iscc` is installed, the setup `.exe`. Universal macOS builds are not produced because `ptts`, NumPy and PDFium ship separate Intel and Apple Silicon wheels; build each architecture on its own runner.
+
+After changing dependencies, run `uv lock`, then regenerate and check the bundle requirements:
+
+~~~bash
+python3 scripts/check-bundle-requirements.py --write
+python3 scripts/check-bundle-requirements.py
+~~~
+

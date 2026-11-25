@@ -1,0 +1,105 @@
+name: macOS and Windows checks and bundles
+# Tests on macOS (Intel and Apple Silicon) and Windows, then builds self-contained desktop bundles:
+# macOS .app/.dmg (unsigned, ad-hoc signed) and Windows setup .exe (Inno Setup) + portable .zip.
+# Artifacts only: this workflow never creates tags or releases.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: desktop-bundles-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  lock-sync:
+    name: bundle requirements match uv.lock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.12.24'
+      - name: Check uv.lock is current
+        run: uv lock --check
+      - name: Check packaging/requirements-bundle.txt
+        run: python3 scripts/check-bundle-requirements.py
+
+  test:
+    name: tests (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15-intel, label: macos-x86_64 }
+          - { os: macos-15, label: macos-aarch64 }
+          - { os: windows-latest, label: windows-x64 }
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.12.24'
+          enable-cache: true
+      - name: Install locked Python dependencies
+        run: uv sync --frozen --python 3.14
+      - name: Unit tests (no models or audio hardware)
+        run: uv run --frozen python -m unittest discover -s tests -v
+      - name: Desktop layout tests (informational)
+        continue-on-error: true
+        env:
+          RUNESPEAK_GUI_TESTS: '1'
+        run: uv run --frozen python -m unittest discover -s tests -v
+      - name: Test browser extension
+        run: node tests/test_extension.cjs
+
+  bundle:
+    name: bundle (${{ matrix.label }})
+    needs: [lock-sync, test]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15-intel, label: macos-x86_64 }
+          - { os: macos-15, label: macos-aarch64 }
+          - { os: windows-latest, label: windows-x64 }
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.12.24'
+      - name: Inno Setup (Windows installer)
+        if: runner.os == 'Windows'
+        run: choco install -y --no-progress innosetup
+      - name: Build and smoke-test the bundle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run --no-project --python 3.14 python packaging/build_bundle.py --output release --smoke
+      - name: Check the Windows installer was built
+        if: runner.os == 'Windows'
+        run: ls release/*-windows-x64-setup.exe release/*-windows-x64-portable.zip
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: runespeak-lite-${{ matrix.label }}-${{ github.sha }}
+          path: |
+            release/*.dmg
+            release/*.exe
+            release/*.zip
+            release/SHA256SUMS-*
+            release/BUILD-MANIFEST-*.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
