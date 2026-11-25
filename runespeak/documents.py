@@ -3,27 +3,59 @@ from pathlib import Path
 import os
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
 from urllib.parse import unquote, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request, url2pathname, urlopen
 import xml.etree.ElementTree as ET
 import zipfile
 
 from .webpage import extract_article, read_html, MAX_PAGE_BYTES
+from .platforms import is_macos, is_windows, kill_tree, start_isolated
 
 MAX_TEXT = 4 * 1024 * 1024
 SUPPORTED = '.txt .md .markdown .pdf .docx .doc .odt .rtf .png .jpg .jpeg .tif .tiff .bmp .webp'.split()
 
 
+# Where the optional converters usually live when they are not on PATH (Finder and the
+# Windows Start menu launch apps with a minimal PATH).
+EXTRA_LOCATIONS = {
+    'libreoffice': ['/Applications/LibreOffice.app/Contents/MacOS/soffice',
+                    r'C:\Program Files\LibreOffice\program\soffice.exe',
+                    r'C:\Program Files (x86)\LibreOffice\program\soffice.exe'],
+    'tesseract': ['/opt/homebrew/bin/tesseract', '/usr/local/bin/tesseract', '/opt/local/bin/tesseract',
+                  r'C:\Program Files\Tesseract-OCR\tesseract.exe'],
+    'pdftotext': ['/opt/homebrew/bin/pdftotext', '/usr/local/bin/pdftotext', '/opt/local/bin/pdftotext'],
+    'pdfinfo': ['/opt/homebrew/bin/pdfinfo', '/usr/local/bin/pdfinfo', '/opt/local/bin/pdfinfo'],
+    'pdftoppm': ['/opt/homebrew/bin/pdftoppm', '/usr/local/bin/pdftoppm', '/opt/local/bin/pdftoppm'],
+}
+
+
+def find_tool(name):
+    found = shutil.which(name) or (shutil.which('soffice') if name == 'libreoffice' else None)
+    if found:
+        return found
+    return next((path for path in EXTRA_LOCATIONS.get(name, ()) if Path(path).is_file()), None)
+
+
+def install_hint(name):
+    if is_macos():
+        return {'tesseract': 'Install Tesseract (for example: brew install tesseract).',
+                'libreoffice': 'Install LibreOffice from libreoffice.org.'}.get(name, 'Install Poppler (for example: brew install poppler).')
+    if is_windows():
+        return {'tesseract': 'Install Tesseract OCR (UB Mannheim build) and add it to PATH.',
+                'libreoffice': 'Install LibreOffice from libreoffice.org.'}.get(name, 'Install Poppler for Windows and add its bin folder to PATH.')
+    package = 'tesseract-ocr' if name == 'tesseract' else 'libreoffice-writer' if name == 'libreoffice' else 'poppler-utils'
+    return f'Install {package}.'
+
+
 def command(args, cancel, timeout=120):
-    if not shutil.which(args[0]):
-        package = 'tesseract-ocr' if args[0] == 'tesseract' else 'libreoffice-writer' if args[0] == 'libreoffice' else 'poppler-utils'
-        raise ValueError(f'{args[0]} is needed for this document. Install {package}.')
+    executable = find_tool(args[0])
+    if not executable:
+        raise ValueError(f'{args[0]} is needed for this document. {install_hint(args[0])}')
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(args, stdout=output, stderr=errors, start_new_session=True)
+        process = start_isolated([executable, *args[1:]], stdout=output, stderr=errors)
         start = time.monotonic()
         try:
             while process.poll() is None:
@@ -45,8 +77,7 @@ def command(args, cancel, timeout=120):
                 raise ValueError('Extracted text exceeds the 4 MB limit.')
             return data.decode('utf-8', 'replace')
         finally:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
+            kill_tree(process)
             process.wait()
 
 
@@ -98,7 +129,70 @@ def image_text(path, cancel):
         return command(['tesseract', str(image_path), 'stdout', '-l', 'eng'], cancel)
 
 
+def pdfium_text(path, cancel, progress):
+    """PDF text without Poppler (the default on macOS and Windows): bundled PDFium.
+
+    Text is rebuilt from positioned runs (see pdflayout) so lines, paragraphs and headings
+    read naturally; scanned pages fall back to Tesseract OCR when it is installed.
+    """
+    import pypdfium2 as pdfium
+    from .pdflayout import page_runs, pdf_layout_text
+    try:
+        document = pdfium.PdfDocument(str(path))
+    except pdfium.PdfiumError as exc:
+        raise ValueError(f'Could not open this PDF ({exc}). Password-protected PDFs are not supported.') from exc
+    try:
+        count = len(document)
+        if count > 200:
+            raise ValueError('PDF exceeds 200 pages. Split it into smaller documents first.')
+        pages = []
+        scanned = []
+        for index in range(count):
+            if cancel.is_set():
+                raise InterruptedError('Document loading cancelled')
+            progress(f'Reading PDF page {index+1} / {count}…')
+            page = document[index]
+            textpage = page.get_textpage()
+            try:
+                width, height = page.get_size()
+                runs = page_runs(textpage)
+                if not runs:
+                    scanned.append(index)
+                    if find_tool('tesseract'):
+                        progress(f'OCR on scanned page {index+1} / {count}…')
+                        with tempfile.TemporaryDirectory(prefix='runespeak-page-') as folder:
+                            image = Path(folder) / 'page.png'
+                            page.render(scale=2400 / max(width, height, 1)).to_pil().save(image)
+                            pages.append(('ocr', image_text(image, cancel)))
+                        continue
+                pages.append(('layout', (width, height, runs)))
+            finally:
+                textpage.close()
+                page.close()
+    finally:
+        document.close()
+    if scanned and len(scanned) == count and not find_tool('tesseract'):
+        raise ValueError(f'This PDF has no text layer (scanned pages). {install_hint("tesseract")}')
+    parts = []
+    group = []
+    for kind, value in pages + [('end', None)]:
+        if kind == 'layout':
+            group.append(value)
+            continue
+        if group:
+            parts.append(pdf_layout_text(group, cancel, progress))
+            group = []
+        if kind == 'ocr' and value.strip():
+            parts.append(value.strip())
+    text = '\n\n'.join(part for part in parts if part)
+    if len(text) > MAX_TEXT:
+        raise ValueError('Extracted text exceeds the 4 MB limit.')
+    return text
+
+
 def pdf_text(path, cancel, progress):
+    if not (find_tool('pdfinfo') and find_tool('pdftotext')):
+        return pdfium_text(path, cancel, progress)
     info = command(['pdfinfo', str(path)], cancel)
     match = re.search(r'^Pages:\s+(\d+)', info, re.M)
     if not match:
@@ -170,7 +264,8 @@ def load_source(source, cancel, progress=lambda message: None):
     if parsed.scheme == 'file':
         if parsed.netloc not in ('', 'localhost'):
             raise ValueError('Only local file URLs are supported.')
-        return extract_file(unquote(parsed.path), cancel, progress)
+        # url2pathname turns /C:/Users/you into a C: drive path on Windows; it only unquotes elsewhere.
+        return extract_file(url2pathname(parsed.path), cancel, progress)
     if parsed.scheme not in ('http', 'https'):
         return extract_file(source, cancel, progress)
     with urlopen(Request(source, headers={'User-Agent': 'Runespeak-Lite/0.2'}), timeout=20) as response:

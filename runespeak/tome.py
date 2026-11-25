@@ -12,7 +12,8 @@ GOLD = '#c7a565'
 
 def configure_theme(root):
     families = set(font.families(root))
-    serif = next((name for name in ('Bitstream Charter', 'Palatino', 'DejaVu Serif') if name in families), 'serif')
+    # Linux, then macOS, then Windows serif faces; Tk falls back to its own serif otherwise.
+    serif = next((name for name in ('Bitstream Charter', 'Palatino', 'DejaVu Serif', 'Palatino Linotype', 'Book Antiqua', 'Georgia', 'Cambria') if name in families), 'serif')
     # Use normal point fonts so Tk and the compositor honor desktop DPI.
     # Do not shrink fonts based on XWayland's reported pixel metrics.
     def size(pixels):

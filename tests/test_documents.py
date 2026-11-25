@@ -66,6 +66,15 @@ class DocumentTests(unittest.TestCase):
         with patch('runespeak.documents.urlopen', return_value=response):
             self.assertIn('research paper', load_source(response.url, self.cancel))
 
+    def test_pdf_without_poppler_uses_pdfium(self):
+        path = self.folder / 'paper.pdf'
+        path.write_bytes(small_pdf('A research paper about local speech.'))
+        with patch('runespeak.documents.find_tool', return_value=None):
+            self.assertIn('research paper', extract_file(path, self.cancel))
+            path.write_bytes(b'%PDF-1.4 not really a pdf')
+            with self.assertRaises(ValueError):
+                extract_file(path, self.cancel)
+
     @unittest.skipUnless(shutil.which('tesseract') and shutil.which('pdftoppm'), 'requires OCR and Poppler')
     def test_real_image_and_scanned_pdf_ocr(self):
         from PIL import Image, ImageDraw, ImageFont

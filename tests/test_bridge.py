@@ -2,6 +2,7 @@ import io
 import json
 from pathlib import Path
 import struct
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from runespeak.bridge import CommandServer, native_message, request, validate
 
 
 class BridgeTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == 'win32', 'Unix sockets; Windows uses the loopback channel in test_platforms')
     def test_roundtrip_and_closed_app(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'app.sock'

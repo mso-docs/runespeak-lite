@@ -1,4 +1,5 @@
 """Opt-in desktop regression checks: RUNESPEAK_GUI_TESTS=1 python -m unittest discover -s tests."""
+import json
 import os
 from pathlib import Path
 import unittest
@@ -170,10 +171,116 @@ class AppTests(unittest.TestCase):
         with patch.object(self.app, 'load_documents') as load:
             self.app.drop_document(SimpleNamespace(data='https://arxiv.org/pdf/2507.11473'))
             load.assert_called_once_with(['https://arxiv.org/pdf/2507.11473'])
+        # Dropping during a job cancels it, then loads the new document once the job is idle.
         self.app.set_busy(True)
         with patch.object(self.app, 'load_documents') as load:
-            self.assertEqual(self.app.drop_document(SimpleNamespace(data='/tmp/paper.pdf')), 'none')
+            self.assertEqual(self.app.drop_document(SimpleNamespace(data='/tmp/paper.pdf')), 'copy')
             load.assert_not_called()
+            self.assertEqual(self.app.pending_documents, ['/tmp/paper.pdf'])
+            self.assertTrue(self.app.cancel.is_set())
+            self.app.events.put(('idle', None))
+            self.app.poll()
+            load.assert_called_once_with(['/tmp/paper.pdf'])
+
+    def test_open_document_uses_native_picker_filtered_and_remembers_folder(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            pdf = Path(folder) / 'reading one.pdf'
+            pdf.write_bytes(b'%PDF-1.4')
+            with patch('runespeak.app.filedialog.askopenfilenames', return_value=(str(pdf),)) as picker, \
+                    patch('runespeak.app.save_preferences') as save, patch.object(self.app, 'load_documents') as load:
+                self.app.open_document()
+            options = picker.call_args.kwargs
+            self.assertIn('*.pdf', options['filetypes'][0][1])
+            self.assertIn('*.docx', options['filetypes'][0][1])
+            self.assertTrue(Path(options['initialdir']).is_dir())
+            load.assert_called_once_with([str(pdf)])
+            self.assertEqual(self.app.preferences['last_folder'], str(Path(folder).resolve()))
+            save.assert_called()
+            with patch('runespeak.app.filedialog.askopenfilenames', return_value=()) as picker:
+                self.app.open_document()
+            self.assertEqual(picker.call_args.kwargs['initialdir'], str(Path(folder).resolve()))
+
+    def test_shortcuts_and_menu_open_and_close(self):
+        accel = 'Command' if self.root.tk.call('tk', 'windowingsystem') == 'aqua' else 'Control'
+        self.assertTrue(self.root.bind_all(f'<{accel}-o>'))
+        self.assertTrue(self.root.bind_all(f'<{accel}-w>'))
+        menu = self.app.menubar.nametowidget(self.app.menubar.entrycget(0, 'menu'))
+        labels = [menu.entrycget(index, 'label') for index in range(menu.index('end') + 1) if menu.type(index) == 'command']
+        self.assertIn('Open Document…', labels)
+        self.assertIn('Close Document', labels)
+
+    def test_speech_menu_opens_engine_settings_and_saves_server(self):
+        menu = self.app.menubar.nametowidget(self.app.menubar.entrycget(1, 'menu'))
+        self.assertEqual(menu.entrycget(0, 'label'), 'Speech Engine…')
+        with patch('runespeak.engine_dialog.load_token', return_value=''):
+            self.app.open_engine_settings()
+        dialog = self.app.engine_dialog
+        self.assertEqual(dialog.kind.get(), 'local')
+        self.assertTrue(dialog.url_entry.instate(['disabled']))
+        dialog.kind.set('server'); dialog.update_state()
+        dialog.url.set('192.0.2.10:8790'); dialog.token.set('secret-value'); dialog.timeout.set('12')
+        with patch('runespeak.engine_dialog.save_token') as save_token, patch('runespeak.app.save_preferences') as save:
+            dialog.save()
+        save_token.assert_called_once_with('secret-value')
+        save.assert_called()
+        self.assertEqual(self.app.preferences['engine'], {'kind': 'server', 'url': 'http://192.0.2.10:8790', 'timeout': 12.0})
+        self.assertNotIn('secret-value', json.dumps(self.app.preferences), 'token never goes in preferences')
+        self.assertIsNone(self.app.engine_dialog)
+
+    def test_server_engine_passes_token_only_through_the_environment(self):
+        self.app.preferences['engine'] = {'kind': 'server', 'url': 'http://192.0.2.10:8790', 'timeout': 9}
+        with patch('runespeak.app.load_token', return_value='secret-value'):
+            settings, environment = self.app.engine_job()
+        self.assertEqual(settings['kind'], 'server')
+        self.assertNotIn('secret-value', json.dumps(settings))
+        self.assertEqual(environment['RUNESPEAK_SERVER_TOKEN'], 'secret-value')
+        self.app.preferences['engine'] = {'kind': 'local'}
+        self.assertEqual(self.app.engine_job(), ({'kind': 'local', 'url': '', 'timeout': 20.0}, None))
+
+    def test_fallback_notice_is_shown(self):
+        from runespeak.backends import BACK_NOTICE, fallback_notice
+        self.app.events.put(('notice', fallback_notice()))
+        self.app.poll()
+        self.assertTrue(self.app.engine_notice.get().startswith('AI server unreachable, narrating on'))
+        self.app.events.put(('notice', BACK_NOTICE))
+        with patch.object(self.root, 'after') as after:
+            self.app.poll()
+        self.assertEqual(self.app.engine_notice.get(), 'Back on AI server.')
+        fade = next(call.args[1] for call in after.call_args_list if call.args and call.args[0] == 8000)
+        fade()
+        self.assertEqual(self.app.engine_notice.get(), '', 'the return notice fades on its own')
+
+    def test_clear_document_stops_and_resets_everything(self):
+        from runespeak.streaming import SectionQueue
+        self.app.text.insert('1.0', 'A loaded reading assignment.')
+        self.app.url.set('file:///tmp/reading.pdf')
+        self.app.prepare_follow(['A loaded reading assignment.'])
+        self.app.stream = SectionQueue(parts=[Path('/tmp/a.wav')])
+        self.app.audio = Path('/tmp/narration.wav')
+        self.app.recorded_input = ('A loaded reading assignment.', False, 'default')
+        self.app.total_seconds = 42.0
+        with patch.object(self.app, 'stop', wraps=self.app.stop) as stop:
+            self.app.clear_document()
+        stop.assert_called_once()
+        self.assertTrue(self.app.cancel.is_set(), 'synthesis is cancelled')
+        self.assertEqual(self.app.text.get('1.0', 'end').strip(), '')
+        self.assertEqual(self.app.url.get(), '')
+        self.assertIsNone(self.app.stream)
+        self.assertIsNone(self.app.audio)
+        self.assertIsNone(self.app.recorded_input)
+        self.assertEqual(self.app.total_seconds, 0.0)
+        self.assertEqual(self.app.follow_ranges, [])
+        self.assertIn('cleared', self.app.status.get())
+
+    def test_opening_a_new_document_replaces_the_old_one(self):
+        self.app.text.insert('1.0', 'The previous reading.')
+        self.app.audio = Path('/tmp/old.wav')
+        with patch.object(self.app, 'load_documents') as load:
+            self.app.replace_document(['/tmp/next.pdf'])
+        load.assert_called_once_with(['/tmp/next.pdf'])
+        self.assertEqual(self.app.text.get('1.0', 'end').strip(), '')
+        self.assertIsNone(self.app.audio)
 
     def test_native_document_drop_registration_is_active(self):
         self.assertTrue(self.app.dnd_enabled)

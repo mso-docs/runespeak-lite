@@ -1,10 +1,10 @@
-"""Small native Linux narrator. All Tk calls stay on the UI thread."""
+"""Small native narrator for Linux, macOS and Windows. All Tk calls stay on the UI thread."""
 import json
+import os
 from importlib.resources import files
 from pathlib import Path
 import queue
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -20,12 +20,24 @@ from .narration import prepare_reading
 from .widgets import Hint
 from .follow import passage_at
 from .preferences import load_preferences, save_preferences
+from .backends import BACK_NOTICE, SERVER, TOKEN_ENV, engine_settings, load_token
 from .navigation import locate_time, audio_slice, headings, heading_targets, reading_context
 from .documents import load_source, SUPPORTED
 from .streaming import SectionQueue
 from .timing import ListeningClock, duration, format_time
 from .bridge import CommandServer, request
 from .tome import TomeSurface, configure_theme, INK
+from .platforms import AudioPlayer, player_command, missing_player_message, python_command, hidden_window_flags, is_macos
+
+COPY_KEY = 'Command+C' if is_macos() else 'Ctrl+C'
+ACCEL = 'Command' if is_macos() else 'Control'
+ACCEL_LABEL = 'Command' if is_macos() else 'Ctrl'
+DOCUMENT_TYPES = [
+    ('Readable documents', ' '.join('*' + suffix for suffix in SUPPORTED)),
+    ('PDF', '*.pdf'), ('Word and OpenDocument', '*.docx *.doc *.odt *.rtf'),
+    ('Text and Markdown', '*.txt *.md *.markdown'), ('Images (OCR)', '*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp'),
+    ('All files', '*'),
+]
 
 
 class App:
@@ -74,6 +86,7 @@ class App:
         self.seek_file = None
         self.playback_continuation = None
         self.pending_reading = None
+        self.pending_documents = None
         self.heading_targets = []
         self.playback_passage_offset = 0
         self.follow_ranges = []
@@ -96,10 +109,18 @@ class App:
         ttk.Entry(bar, textvariable=self.url, style='Tome.TEntry', font=(serif, font_size(15))).pack(side='left', fill='x', expand=True)
         self.load_button = ttk.Button(bar, text='Load link', command=self.load_page, style='Tome.TButton')
         self.load_button.pack(side='left', padx=(8, 0))
+        self.browse_button = ttk.Button(bar, text='Browse files…', command=self.open_document, style='Tome.TButton')
+        self.browse_button.pack(side='left', padx=(8, 0))
+        Hint(self.browse_button, f'Choose a PDF, Word, Markdown, text or image file ({ACCEL_LABEL}+O)')
         inscription = ttk.Frame(outer, style='Tome.TFrame')
         inscription.grid(row=2, column=0, sticky='ew')
         ttk.Label(inscription, text='THE INSCRIBED WORDS', style='Chapter.TLabel').pack(side='left')
-        ttk.Button(inscription, text='Open document…', command=self.open_document, style='Tome.TButton').pack(side='right', padx=(8, 0))
+        self.clear_button = ttk.Button(inscription, text='Clear', command=self.clear_document, style='Tome.TButton')
+        self.clear_button.pack(side='right', padx=(8, 0))
+        Hint(self.clear_button, f'Close this document and stop narration ({ACCEL_LABEL}+W)')
+        self.open_button = ttk.Button(inscription, text='Open document…', command=self.open_document, style='Tome.TButton')
+        self.open_button.pack(side='right', padx=(8, 0))
+        Hint(self.open_button, f'Open a document with the file picker ({ACCEL_LABEL}+O)')
         ttk.Button(inscription, text='Paste copied text', command=self.paste, style='Tome.TButton').pack(side='right')
         self.pages = ttk.Notebook(outer, style='Tome.TNotebook')
         self.pages.grid(row=3, column=0, sticky='nsew', pady=(8, 10))
@@ -158,11 +179,20 @@ class App:
         self.navigation_button = ttk.Button(controls, text='Read from here and jump to headings', compound='image', image=self.navigation_icon, command=self.navigation_menu, style='Seal.TButton')
         self.navigation_button.grid(row=0, column=7, sticky='e', pady=(4, 10), padx=(0, 8))
         Hint(self.navigation_button, 'Bookmark — read from selection or jump to a heading')
+        # Right-click is <Button-2> (or Control-click) under macOS Aqua, <Button-3> elsewhere.
+        context_events = ('<Button-2>', '<Control-Button-1>') if is_macos() else ('<Button-3>',)
+        read_events = ('<Control-Return>', '<Command-Return>') if is_macos() else ('<Control-Return>',)
         for widget in (self.text, self.reader):
-            widget.bind('<Button-3>', self.navigation_context)
-            widget.bind('<Control-Return>', lambda event: (self.read_from_here(), 'break')[1])
-        root.bind('<Alt-Left>', lambda event: (self.seek_relative(-10), 'break')[1])
-        root.bind('<Alt-Right>', lambda event: (self.seek_relative(10), 'break')[1])
+            for sequence in context_events:
+                widget.bind(sequence, self.navigation_context)
+            for sequence in read_events:
+                widget.bind(sequence, lambda event: (self.read_from_here(), 'break')[1])
+        for modifier in (('Alt', 'Option') if is_macos() else ('Alt',)):
+            try:
+                root.bind(f'<{modifier}-Left>', lambda event: (self.seek_relative(-10), 'break')[1])
+                root.bind(f'<{modifier}-Right>', lambda event: (self.seek_relative(10), 'break')[1])
+            except tk.TclError:
+                pass  # Modifier name unknown to this Tk build.
         tools = ttk.Frame(controls, style='Tome.TFrame')
         tools.grid(row=1, column=0, columnspan=9, sticky='ew')
         for column, (label, action) in enumerate([('Save WAV', self.save), ('Open WAV', self.open_audio), ('Preview reading', self.preview_reading)]):
@@ -178,6 +208,9 @@ class App:
         timer.grid(row=7, column=0, sticky='w', pady=(8, 0))
         Hint(timer, lambda: 'Elapsed / total · ~ means estimated\nTotal listened this sitting: ' + format_time(self.clock.snapshot()[1]))
         ttk.Label(outer, textvariable=self.status, wraplength=800, style='Tome.TLabel').grid(row=8, column=0, sticky='ew', pady=(8, 0))
+        # Engine notices (such as falling back from the AI server) stay until the next narration.
+        self.engine_notice = tk.StringVar(value='')
+        ttk.Label(outer, textvariable=self.engine_notice, wraplength=800, style='Tome.TLabel', foreground='#8a3b12').grid(row=9, column=0, sticky='ew')
         self.dnd_enabled = False
         try:
             from tkinterdnd2 import TkinterDnD, DND_FILES, DND_TEXT
@@ -191,13 +224,125 @@ class App:
         if enable_bridge:
             self.bridge = CommandServer(self.enqueue_command)
         root.protocol('WM_DELETE_WINDOW', self.close)
+        self.build_menu()
+        for key, action in (('o', self.open_document), ('w', self.clear_document)):
+            for sequence in (f'<{ACCEL}-{key}>', f'<{ACCEL}-{key.upper()}>'):
+                root.bind_all(sequence, lambda event, action=action: (action(), 'break')[1])
+        if is_macos():
+            # Command+Q and the app menu's Quit, plus files dropped on the Dock icon or
+            # opened with Finder's Open With.
+            root.createcommand('tk::mac::Quit', self.close)
+            root.createcommand('::tk::mac::OpenDocument', self.open_paths)
         root.after(100, self.poll)
+
+    def build_menu(self):
+        menubar = tk.Menu(self.root)
+        document = tk.Menu(menubar, tearoff=False)
+        document.add_command(label='Open Document…', accelerator=f'{ACCEL_LABEL}+O', command=self.open_document)
+        document.add_command(label='Close Document', accelerator=f'{ACCEL_LABEL}+W', command=self.clear_document)
+        document.add_separator()
+        document.add_command(label='Open WAV…', command=self.open_audio)
+        document.add_command(label='Save WAV…', command=self.save)
+        if not is_macos():
+            document.add_separator()
+            document.add_command(label='Quit', command=self.close)
+        menubar.add_cascade(label='File', menu=document)
+        speech = tk.Menu(menubar, tearoff=False)
+        speech.add_command(label='Speech Engine…', command=self.open_engine_settings)
+        menubar.add_cascade(label='Speech', menu=speech)
+        if is_macos():
+            try:
+                self.root.createcommand('tk::mac::ShowPreferences', self.open_engine_settings)
+            except tk.TclError:
+                pass
+        self.root.configure(menu=menubar)
+        self.menubar = menubar
+
+    def open_engine_settings(self):
+        if getattr(self, 'engine_dialog', None):
+            try:
+                self.engine_dialog.window.lift()
+                return
+            except tk.TclError:
+                pass
+        from .engine_dialog import EngineDialog
+        self.engine_dialog = EngineDialog(self)
+
+    def save_preferences_quietly(self):
+        try:
+            save_preferences(self.preferences)
+        except OSError:
+            pass
+
+    def engine_job(self):
+        """Engine settings for a worker job, plus the environment carrying any token."""
+        settings = engine_settings(self.preferences)
+        environment = None
+        if settings['kind'] == SERVER:
+            token = load_token()
+            if token:
+                environment = dict(os.environ, **{TOKEN_ENV: token})
+        return settings, environment
+
+    def document_folder(self):
+        folder = self.preferences.get('last_folder')
+        if isinstance(folder, str) and Path(folder).is_dir():
+            return folder
+        documents = Path.home() / 'Documents'
+        return str(documents if documents.is_dir() else Path.home())
+
+    def remember_folder(self, path):
+        folder = str(Path(path).expanduser().resolve().parent)
+        if self.preferences.get('last_folder') == folder:
+            return
+        self.preferences['last_folder'] = folder
+        try:
+            save_preferences(self.preferences)
+        except OSError:
+            pass
+
+    def has_document(self):
+        return bool(self.text.get('1.0', 'end').strip() or self.audio or self.stream or self.busy or self.player)
+
+    def clear_document(self, announce=True):
+        """Stop playback and synthesis, forget the narration, and empty the tome."""
+        self.pending_documents = None
+        self.stop()
+        self.stream = None
+        self.audio = None
+        self.recorded_input = None
+        self.section_durations = []
+        self.section_words = []
+        self.total_seconds = 0.0
+        self.total_estimated = False
+        self.clock.reset()
+        self.text.delete('1.0', 'end')
+        self.text.edit_reset()
+        self.url.set('')
+        self.prepare_follow([])
+        self.pages.select(0)
+        if announce:
+            self.status.set('Tome cleared. Open another document, paste text, or load a link.')
+
+    def open_paths(self, *paths):
+        paths = [str(path) for path in paths if str(path).strip()]
+        if not paths:
+            return
+        audio = [path for path in paths if Path(path).suffix.lower() == '.wav']
+        if audio:
+            if self.busy:
+                self.status.set('Stop the current job before opening another file.')
+                return
+            self.load_audio(audio[0])
+            self.play()
+        else:
+            self.replace_document(paths)
 
     def paste(self):
         try:
             value = self.root.clipboard_get()
         except tk.TclError:
-            messagebox.showinfo('Clipboard', 'Copy highlighted text first (Ctrl+C), then paste here.')
+            messagebox.showinfo('Clipboard', f'Copy highlighted text first ({COPY_KEY}), then paste here.')
             return
         self.text.delete('1.0', 'end')
         self.text.insert('1.0', value)
@@ -214,25 +359,42 @@ class App:
         self.progress.configure(mode='determinate')
 
     def open_document(self):
-        if self.busy:
-            self.status.set('Stop the current job before loading another document.')
+        if self.preview_loading:
+            self.status.set('Wait for the narrator preview to finish, then open a document.')
             return
-        paths = filedialog.askopenfilenames(title='Open documents for the speaking tome', filetypes=[
-            ('Readable documents', ' '.join('*'+suffix for suffix in SUPPORTED)), ('All files', '*')])
+        paths = filedialog.askopenfilenames(parent=self.root, title='Open documents for the speaking tome',
+                                            initialdir=self.document_folder(), filetypes=DOCUMENT_TYPES)
+        if isinstance(paths, str):
+            paths = self.root.tk.splitlist(paths) if paths else ()
         if paths:
-            self.load_documents(list(paths))
+            self.remember_folder(paths[0])
+            self.replace_document(list(paths))
+
+    def replace_document(self, sources):
+        """Open new documents in place of the current one, stopping anything in progress first."""
+        if self.has_document():
+            self.clear_document(announce=False)
+        if self.busy:
+            self.pending_documents = list(sources)  # Loaded once the cancelled job reports idle.
+            self.status.set('Stopping the current narration…')
+            return
+        self.load_documents(list(sources))
 
     def drop_document(self, event):
-        if self.busy:
-            self.status.set('Stop the current job before dropping another document.')
-            return 'none'
-        data = event.data.strip()
+        data = event.data
+        if isinstance(data, (tuple, list)):
+            # Tk 9 can hand over an already-split Tcl list instead of a string.
+            sources = [str(item) for item in data if str(item).strip()]
+            if sources:
+                self.replace_document(sources)
+            return 'copy'
+        data = str(data).strip()
         if data.startswith(('http://', 'https://', 'file://')):
             sources = [line.strip() for line in data.splitlines() if line.strip() and not line.startswith('#')]
         else:
             sources = list(self.root.tk.splitlist(data))
         if sources:
-            self.load_documents(sources)
+            self.replace_document(sources)
         return 'copy'
 
     def load_page(self):
@@ -314,6 +476,7 @@ class App:
         self.stop_player()
         self.cancel.clear()
         self.set_busy(True)
+        self.engine_notice.set('')
         self.status.set('The tome stirs… Preparing its voice. The first invocation downloads the model.')
         self.audio = None
         self.stream = SectionQueue()
@@ -332,15 +495,18 @@ class App:
             try:
                 directory = Path(tempfile.mkdtemp(dir=self.temp.name))
                 job = directory / 'job.json'
-                job.write_text(json.dumps({'chunks': pieces, 'directory': str(directory), 'voice': voice}))
+                engine, environment = self.engine_job()
+                job.write_text(json.dumps({'chunks': pieces, 'directory': str(directory), 'voice': voice, 'engine': engine}))
                 with (directory / 'errors.log').open('w+') as errors:
                     with self.lock:
                         if self.cancel.is_set():
                             return
-                        process = subprocess.Popen([sys.executable, '-m', 'runespeak.worker', str(job)], stdout=subprocess.PIPE, stderr=errors, text=True)
+                        process = subprocess.Popen(python_command('runespeak.worker', job), stdout=subprocess.PIPE, stderr=errors, text=True, creationflags=hidden_window_flags(), env=environment)
                         self.process = process
                     for line in process.stdout:
-                        if line.strip().isdigit():
+                        if line.startswith('notice '):
+                            self.events.put(('notice', line[7:].strip()))
+                        elif line.strip().isdigit():
                             count = int(line.strip())
                             self.events.put(('section', (directory / f'{count - 1:05d}.wav', count, len(pieces))))
                     process.stdout.close()
@@ -370,7 +536,6 @@ class App:
         self.clock.pause()
         self.playback_continuation = None
         if self.player and self.player.poll() is None:
-            self.player.send_signal(signal.SIGCONT)
             self.player.terminate()
             try:
                 self.player.wait(timeout=2)
@@ -387,9 +552,9 @@ class App:
         self.paused = False
 
     def start_file(self, path, seek=0):
-        command = next((p for p in ['pw-play', 'paplay', 'aplay'] if shutil.which(p)), None)
+        command = player_command()
         if not command:
-            self.playback_failed('Install a PipeWire, PulseAudio, or ALSA command-line player.')
+            self.playback_failed(missing_player_message())
             return
         try:
             original_path = Path(path)
@@ -402,7 +567,7 @@ class App:
                 if not self.stream and seek+length < (duration(original_path) or 0)-.001:
                     self.playback_continuation = (original_path, seek+length)
             self.playback_log = tempfile.TemporaryFile(mode='w+')
-            self.player = subprocess.Popen([command, str(path)], stderr=self.playback_log)
+            self.player = AudioPlayer(path, stderr=self.playback_log, command=command)
             self.clock.start(offset+seek, length)
             self.update_follow()
         except (OSError, ValueError) as exc:
@@ -443,7 +608,7 @@ class App:
             return
         if self.player and self.player.poll() is None:
             if self.paused:
-                self.player.send_signal(signal.SIGCONT)
+                self.player.resume()
                 self.paused = False
                 self.clock.resume()
                 self.status.set('Playing')
@@ -468,7 +633,7 @@ class App:
     def pause(self):
         self.clock.pause()
         if self.player and self.player.poll() is None:
-            self.player.send_signal(signal.SIGSTOP)
+            self.player.pause()
         if self.player or (self.stream and self.stream.active):
             self.paused = True
             self.status.set('Paused')
@@ -604,26 +769,35 @@ class App:
                             response.update({'ok': False, 'error': str(exc)})
                         done.set()
                 elif kind == 'voice_preview' and not self.cancel.is_set():
-                    player = next((p for p in ('pw-play', 'paplay', 'aplay') if shutil.which(p)), None)
+                    player = player_command()
                     if player:
                         try:
                             self.preview_log = tempfile.TemporaryFile(mode='w+')
-                            self.preview_player = subprocess.Popen([player, str(value)], stderr=self.preview_log)
+                            self.preview_player = AudioPlayer(value, stderr=self.preview_log, command=player)
                             self.status.set('Previewing narrator — ' + self.preview_voice_name)
                         except OSError as exc:
                             self.stop_preview()
                             messagebox.showerror('Narrator preview', str(exc))
                     else:
-                        messagebox.showerror('Narrator preview', 'Install pw-play, paplay or aplay.')
+                        messagebox.showerror('Narrator preview', missing_player_message())
                 elif kind == 'idle':
                     self.preview_loading = False
                     self.set_busy(False)
-                    if self.pending_reading is not None:
+                    if self.pending_documents is not None:
+                        sources, self.pending_documents = self.pending_documents, None
+                        self.load_documents(sources)
+                    elif self.pending_reading is not None:
                         text, self.pending_reading = self.pending_reading, None
                         self.narrate(text_override=text)
                 elif kind == 'load_error':
                     self.status.set('Could not load this manuscript. Existing narration is still available.')
                     messagebox.showerror('Open document', value)
+                elif kind == 'notice':
+                    # Calm, non-blocking: the fallback notice stays while narrating here;
+                    # the return notice fades after a few seconds.
+                    self.engine_notice.set(value)
+                    if value == BACK_NOTICE:
+                        self.root.after(8000, lambda: self.engine_notice.get() == BACK_NOTICE and self.engine_notice.set(''))
                 elif kind == 'error':
                     if self.stream:
                         self.stop_player()
@@ -888,7 +1062,7 @@ class App:
                     with self.lock:
                         if self.cancel.is_set():
                             return
-                        process = subprocess.Popen([sys.executable, '-m', 'runespeak.worker', str(job)], stdout=subprocess.DEVNULL, stderr=errors)
+                        process = subprocess.Popen(python_command('runespeak.worker', job), stdout=subprocess.DEVNULL, stderr=errors, creationflags=hidden_window_flags())
                         self.process = process
                     code = process.wait()
                     if self.cancel.is_set():
@@ -1009,7 +1183,7 @@ class App:
             try:
                 text = self.root.clipboard_get() if action == 'clipboard' else message['text']
             except tk.TclError:
-                return {'ok': False, 'error': 'Copy highlighted text first with Ctrl+C.'}
+                return {'ok': False, 'error': f'Copy highlighted text first with {COPY_KEY}.'}
             if not text.strip():
                 return {'ok': False, 'error': 'Select or copy some text first.'}
             self.text.delete('1.0', 'end')

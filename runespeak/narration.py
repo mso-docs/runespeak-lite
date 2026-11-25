@@ -157,5 +157,9 @@ def prepare_reading(text, include_backmatter=False):
         value = match[0]
         ending = re.search(r'[.,;:!?)]+$', value)
         return 'there is a URL here' + (ending[0] if ending else '')
-    result.text = re.sub(r'(?m)^\s{0,3}#{1,6}\s+', '', URL.sub(replace_url, spoken))
+    # Headings end with a stop when spoken, so they never run into the next sentence.
+    def heading(match):
+        title = match.group(1).rstrip().rstrip('#').rstrip()
+        return title + ('' if re.search(r'[.!?:;]["”’)]*$', title) else '.')
+    result.text = re.sub(r'(?m)^\s{0,3}#{1,6}\s+(.*)$', heading, URL.sub(replace_url, spoken))
     return result

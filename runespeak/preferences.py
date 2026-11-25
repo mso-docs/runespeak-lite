@@ -1,11 +1,11 @@
 """Small per-user preferences, written only after explicit selection."""
 import json
-import os
-from pathlib import Path
+
+from .platforms import config_dir
 
 
 def preferences_path():
-    return Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'runespeak-lite/preferences.json'
+    return config_dir() / 'preferences.json'
 
 
 def load_preferences():

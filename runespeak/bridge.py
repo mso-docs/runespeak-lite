@@ -1,10 +1,15 @@
-"""Per-user Unix socket, CLI shortcut client, and Firefox native message host.
+"""Per-user command channel, CLI shortcut client, and Firefox native message host.
 
-No TCP port, browser page listener, automatic app launch, or clipboard watcher.
+Linux and macOS use a private Unix socket. Windows Python has no Unix sockets, so the
+app listens on 127.0.0.1 only, on a random port, and every request must carry a random
+per-session token stored in the user's private app-data folder. There is no browser
+page listener, automatic app launch, or clipboard watcher.
 """
 import argparse
+import hmac
 import json
 import os
+import secrets
 from pathlib import Path
 import socket
 import socketserver
@@ -13,9 +18,19 @@ import struct
 import sys
 import threading
 
+from .platforms import is_windows
+
 MAX_MESSAGE = 1_000_000
 HOST_NAME = 'org.runespeak.lite'
 EXTENSION_ID = 'runespeak-lite@local'
+
+
+def endpoint_path() -> Path:
+    """Windows: where the running app records its loopback port and session token."""
+    base = os.environ.get('RUNESPEAK_RUNTIME_DIR') or os.environ.get('LOCALAPPDATA') or str(Path.home() / 'AppData' / 'Local')
+    directory = Path(base) / 'runespeak-lite'
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / 'bridge.json'
 
 
 def socket_path() -> Path:
@@ -51,20 +66,80 @@ def request(message, path=None):
     if len(data) > MAX_MESSAGE:
         raise ValueError('Selected text exceeds the 1 MB message limit.')
     try:
-        with socket.socket(socket.AF_UNIX) as client:
+        if is_windows() and path is None:
+            endpoint = json.loads(endpoint_path().read_text())
+            data = json.dumps(dict(message, token=endpoint['token'])).encode() + b'\n'
+            client = socket.create_connection(('127.0.0.1', int(endpoint['port'])), timeout=5)
+        else:
+            client = socket.socket(socket.AF_UNIX)
             client.settimeout(5)
             client.connect(str(path or socket_path()))
+        with client:
             client.sendall(data)
             with client.makefile('rb') as stream:
                 response = stream.readline(MAX_MESSAGE + 1)
             return json.loads(response)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
         raise RuntimeError('Open Runespeak Lite first. The app must be running to read selections.') from exc
 
 
 class CommandServer:
     def __init__(self, callback, path=None):
-        self.path = Path(path) if path else socket_path()
+        self.token = None
+        if is_windows() and path is None:
+            self.path = endpoint_path()
+            self._check_loopback_instance()
+            self.token = secrets.token_urlsafe(32)
+        else:
+            self.path = Path(path) if path else socket_path()
+            self._check_unix_instance()
+        token = self.token
+
+        class Handler(socketserver.StreamRequestHandler):
+            def handle(inner):
+                inner.connection.settimeout(5)
+                try:
+                    data = inner.rfile.readline(MAX_MESSAGE + 1)
+                    if len(data) > MAX_MESSAGE or not data.endswith(b'\n'):
+                        raise ValueError('Invalid or oversized command')
+                    message = json.loads(data)
+                    if token is not None:
+                        supplied = message.pop('token', None) if isinstance(message, dict) else None
+                        if not isinstance(supplied, str) or not hmac.compare_digest(supplied, token):
+                            raise ValueError('Unauthorized command')
+                    result = callback(validate(message))
+                except Exception as exc:
+                    result = {'ok': False, 'error': str(exc)}
+                try:
+                    inner.wfile.write(json.dumps(result).encode() + b'\n')
+                except OSError:
+                    pass
+        if token is not None:
+            class Server(socketserver.ThreadingTCPServer):
+                daemon_threads = True
+                allow_reuse_address = False
+            self.server = Server(('127.0.0.1', 0), Handler)
+            temporary = self.path.with_suffix('.tmp')
+            temporary.write_text(json.dumps({'port': self.server.server_address[1], 'token': token, 'pid': os.getpid()}))
+            temporary.replace(self.path)
+        else:
+            class Server(socketserver.ThreadingUnixStreamServer):
+                daemon_threads = True
+            self.server = Server(str(self.path), Handler)
+            self.path.chmod(0o600)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def _check_loopback_instance(self):
+        try:
+            endpoint = json.loads(self.path.read_text())
+            with socket.create_connection(('127.0.0.1', int(endpoint['port'])), timeout=1):
+                pass
+        except (OSError, ValueError, KeyError, TypeError):
+            return  # No live instance; the stale file is overwritten.
+        raise RuntimeError('Runespeak Lite is already running.')
+
+    def _check_unix_instance(self):
         # Never remove another live instance's socket.
         if self.path.exists():
             with socket.socket(socket.AF_UNIX) as probe:
@@ -74,26 +149,6 @@ class CommandServer:
                     self.path.unlink()
                 else:
                     raise RuntimeError('Runespeak Lite is already running.')
-        class Handler(socketserver.StreamRequestHandler):
-            def handle(inner):
-                inner.connection.settimeout(5)
-                try:
-                    data = inner.rfile.readline(MAX_MESSAGE + 1)
-                    if len(data) > MAX_MESSAGE or not data.endswith(b'\n'):
-                        raise ValueError('Invalid or oversized command')
-                    result = callback(validate(json.loads(data)))
-                except Exception as exc:
-                    result = {'ok': False, 'error': str(exc)}
-                try:
-                    inner.wfile.write(json.dumps(result).encode() + b'\n')
-                except OSError:
-                    pass
-        class Server(socketserver.ThreadingUnixStreamServer):
-            daemon_threads = True
-        self.server = Server(str(self.path), Handler)
-        self.path.chmod(0o600)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
 
     def close(self):
         self.server.shutdown()
@@ -152,7 +207,10 @@ def main():
         # Shortcut invocations have no terminal; show failure using desktop notifications.
         import shutil
         import subprocess
-        if shutil.which('notify-send'):
+        if sys.platform == 'darwin':
+            script = 'display notification ' + json.dumps(str(exc)) + ' with title "Runespeak Lite"'
+            subprocess.run(['osascript', '-e', script], check=False)
+        elif shutil.which('notify-send'):
             subprocess.run(['notify-send', 'Runespeak Lite', str(exc)], check=False)
         raise SystemExit(1)
 
