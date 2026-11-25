@@ -22,3 +22,7 @@ dist/
 .env.*
 !.env.example
 /build/
+
+# Desktop bundle builds
+/release/
+/.bundle-cache/
